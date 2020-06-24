@@ -16,7 +16,7 @@
 # which in theory it isn't, but it suited my purposes.
 
 # Create a tag file just so Intune knows this was installed
-if (-not (Test-Path "$($env:ProgramData)\DeviceRegistration\WaitForUserDeviceRegistration"))
+If (-Not (Test-Path "$($env:ProgramData)\DeviceRegistration\WaitForUserDeviceRegistration"))
 {
     Mkdir "$($env:ProgramData)\DeviceRegistration\WaitForUserDeviceRegistration"
 }
