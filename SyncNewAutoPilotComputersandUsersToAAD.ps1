@@ -9,7 +9,7 @@
 # and helps to avoid the 3rd authentication prompt.
 #
 # Only devices with a userCertificate attribute are synced, so this script only attempts
-# to sync devices that have been created within the last 5 hours and have the attribute set,
+# to sync devices that have this attribute updated in the last 5 minutes and have the attribute set,
 # which is checked every 5 minutes via any changes in the object's Modified time.
 #
 # Install this as a scheduled task that runs every 5 minutes on your AADConnect server.
