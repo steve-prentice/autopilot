@@ -1,6 +1,6 @@
 # SyncNewAutoPilotComputersandUsersToAAD.ps1
 #
-# Version 1.3
+# Version 1.4
 #
 # Stolen from Alex Durrant. Updated by Steve Prentice, 2020
 #
@@ -18,13 +18,14 @@
 Import-Module ActiveDirectory
 
 $time = [DateTime]::Now.AddMinutes(-5)
-$computers = Get-ADComputer -Filter 'Modified -ge $time' -SearchBase "OU=AutoPilotDevices,OU=Computers,DC=somedomain,DC=com" -Properties Created, Modified, userCertificate
+$computers = Get-ADComputer -Filter 'Modified -ge $time' -SearchBase "OU=AutoPilotDevices,OU=Computers,DC=somedomain,DC=com" -Properties Modified, userCertificate
 $users = Get-ADUser -Filter 'Created -ge $time' -SearchBase "OU=W10Users,OU=Users,DC=somedomain,DC=com" -Properties Created
+$dc = Get-ADDomainController -Discover
 
 If ($computers -ne $null) {
     ForEach ($computer in $computers) {
-        $diff = $computer.Modified.Subtract($computer.Created)
-        If (($diff.TotalHours -le 5) -And ($computer.userCertificate)) {
+        $replicationmetadata = Get-ADReplicationAttributeMetadata -Object $computer -Server $dc -Properties userCertificate
+        If (($replicationmetadata.LastOriginatingChangeTime -ge $time) -And ($computer.userCertificate)) {
             # The below adds to AD groups automatically if you want
             #Add-ADGroupMember -Identity "Some Intune Co-management Pilot Device Group" -Members $computer
             $syncComputers = "True"
