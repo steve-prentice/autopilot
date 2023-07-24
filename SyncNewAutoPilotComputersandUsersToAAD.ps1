@@ -22,7 +22,7 @@ $computers = Get-ADComputer -Filter 'Modified -ge $time' -SearchBase "OU=AutoPil
 $users = Get-ADUser -Filter 'Created -ge $time' -SearchBase "OU=W10Users,OU=Users,DC=somedomain,DC=com" -Properties Created
 $dc = Get-ADDomainController -Discover
 
-If ($computers -ne $null) {
+If ($null -ne $computers) {
     ForEach ($computer in $computers) {
         $replicationmetadata = Get-ADReplicationAttributeMetadata -Object $computer -Server $dc -Properties userCertificate
         If (($replicationmetadata.LastOriginatingChangeTime -ge $time) -And ($computer.userCertificate)) {
@@ -35,7 +35,7 @@ If ($computers -ne $null) {
     Start-Sleep -Seconds 30
 }
 
-If (($syncComputers -ne $null) -Or ($users -ne $null)) {
+If (($null -ne $syncComputers) -Or ($null -ne $users)) {
     Try { Start-ADSyncSyncCycle -PolicyType Delta }
     Catch {}
 }
