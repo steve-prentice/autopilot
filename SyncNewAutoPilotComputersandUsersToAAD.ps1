@@ -1,41 +1,73 @@
 # SyncNewAutoPilotComputersandUsersToAAD.ps1
 #
-# Version 1.4
+# Draft version 2.0
 #
-# Stolen from Alex Durrant. Updated by Steve Prentice, 2020
-#
-# Triggers an ADDConnect Delta Sync if new objects are found to be have been created
-# in the OU's in question, this is helpful with Hybrid AD joined devices via Autopilot
-# and helps to avoid the 3rd authentication prompt.
-#
-# Only devices with a userCertificate attribute are synced, so this script only attempts
-# to sync devices that have this attribute updated in the last 5 minutes and have the attribute set,
-# which is checked every 5 minutes via any changes in the object's Modified time.
-#
-# Install this as a scheduled task that runs every 5 minutes on your AADConnect server.
-# Change the OU's to match your environment.
 
-Import-Module ActiveDirectory
+# Run this script from the Microsoft Entra Connect (AAD Sync) server
 
-$time = [DateTime]::Now.AddMinutes(-5)
-$computers = Get-ADComputer -Filter 'Modified -ge $time' -SearchBase "OU=AutoPilotDevices,OU=Computers,DC=somedomain,DC=com" -Properties Modified, userCertificate
-$users = Get-ADUser -Filter 'Created -ge $time' -SearchBase "OU=W10Users,OU=Users,DC=somedomain,DC=com" -Properties Created
-$dc = Get-ADDomainController -Discover
+# Enter your OU, or entire domain DN:
+$BaseOu = "OU=MyOu,DC=demolab,DC=local"
 
-If ($null -ne $computers) {
-    ForEach ($computer in $computers) {
-        $replicationmetadata = Get-ADReplicationAttributeMetadata -Object $computer -Server $dc -Properties userCertificate
-        If (($replicationmetadata.LastOriginatingChangeTime -ge $time) -And ($computer.userCertificate)) {
-            # The below adds to AD groups automatically if you want
-            #Add-ADGroupMember -Identity "Some Intune Co-management Pilot Device Group" -Members $computer
-            $syncComputers = "True"
-        }
+###################################################################################################
+
+#region 1: Identify computers to sync
+
+Import-module -Name "$env:ProgramFiles\Microsoft Azure AD Sync\Bin\ADSyncDiagnostics\ADSyncDiagnostics.psm1"
+
+$VerbosePreference = "Continue"
+
+# Becuse there could be multiple domains, we want the oldest start time across all AD connectors
+$LastSyncCycleStart = (GetADConnectors | sort LastModificationTime | select -First 1).LastModificationTime
+
+# Use the native AdsiSearcher so we don't need the the ActveDirectory PowerShell module (RSAT), 
+# which isn't present by default, on an AAD Connect server.
+$Searcher = [AdsiSearcher]::new()
+$Searcher.SearchRoot = "LDAP://$BaseOu"
+
+# Don't necessarily want to know when created, instead, we want to know when the HAADJ process started (cert date).
+# However, if you have a lot of computers, you could use a reasonable time span to limit results.
+# $LdapTimeStamp = Get-Date $LastSyncCycleStart -Format yyyyMMddHHmmss.0Z
+# $Searcher.Filter = "(&(objectClass=computer)(userCertificate=*)(WhenCreated>=$LdapTimeStamp))"
+$Searcher.Filter = "(&(objectClass=computer)(userCertificate=*))"
+
+$SearcherResults = $Searcher.FindAll()
+$Searcher.Dispose()
+
+$HaadjInfo = $SearcherResults | foreach {
+    $LatestCert = $_.Properties.usercertificate[0]
+    $LatestCert_X509 = [Security.Cryptography.X509Certificates.X509Certificate2]::new($LatestCert)
+    [pscustomobject]@{
+        Computer_DN       = $_.Properties.distinguishedname # case sensitive properties        
+        Cert_NotBefore    = $LatestCert_X509.NotBefore
+        HasSelfSignedCert = $LatestCert_X509.Issuer -match $_.Properties.ObjectGUID
     }
-    # Wait for 30 seconds to allow for some replication
-    Start-Sleep -Seconds 30
 }
 
-If (($null -ne $syncComputers) -Or ($null -ne $users)) {
-    Try { Start-ADSyncSyncCycle -PolicyType Delta }
-    Catch {}
+$ComputersToSync = $HaadjInfo | where Cert_NotBefore -gt $LastSyncCycleStart
+
+#endregion 1
+
+
+#region 2: Sync each new computer
+
+# Wait for any existing sync to stop (Microsoft says to disable the scheduler, but this seems overkill
+# https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-single-object-sync#run-the-single-object-sync-tool
+while ((Get-ADSyncScheduler).SyncCycleInProgress) {
+    Write-Verbose "SyncCycleInProgress - waiting 15 seconds"
+    sleep 15    
 }
+
+$AADConnector = GetAADConnector
+# Microsoft also asks that we wait 5 minutes between Entra export or import
+# : https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-single-object-sync#single-object-sync-throttling
+$5MinutesFromNow = (Get-Date).AddMinutes(5)
+while ($AADConnector.LastModificationTime -lt $5MinutesFromNow) {
+    Write-Verbose "Microsoft asks we wait 5 minutes between exports - waiting one minute."
+    sleep 60    
+}
+
+foreach ($Computer in $ComputersToSync) {
+    Invoke-ADSyncSingleObjectSync -DistinguishedName $Computer.Computer_DN -NoHtmlReport -StagingMode # | ConvertFrom-Json
+}
+
+#endregion 2
