@@ -12,12 +12,14 @@ $BaseOu = "OU=MyOu,DC=demolab,DC=local"
 
 #region 1: Identify computers to sync
 
-Import-module -Name "$env:ProgramFiles\Microsoft Azure AD Sync\Bin\ADSyncDiagnostics\ADSyncDiagnostics.psm1"
+Import-Module -Name "$env:ProgramFiles\Microsoft Azure AD Sync\Bin\ADSyncDiagnostics\ADSyncDiagnostics.psm1"
 
 $VerbosePreference = "Continue"
 
+# Get most recent import/sync/export results
+$PreviousSyncResults = GetADConnectors | foreach { Get-ADSyncRunProfileResult -ConnectorId $_.Identifier -NumberRequested 3 }
 # Becuse there could be multiple domains, we want the oldest start time across all AD connectors
-$LastSyncCycleStart = (GetADConnectors | sort LastModificationTime | select -First 1).LastModificationTime
+$LastSyncCycleStart = (($PreviousSyncResults.startdate | sort)[0]).ToLocalTime()
 
 # Use the native AdsiSearcher so we don't need the the ActveDirectory PowerShell module (RSAT), 
 # which isn't present by default, on an AAD Connect server.
@@ -34,12 +36,10 @@ $SearcherResults = $Searcher.FindAll()
 $Searcher.Dispose()
 
 $HaadjInfo = $SearcherResults | foreach {
-    $LatestCert = $_.Properties.usercertificate[0]
-    $LatestCert_X509 = [Security.Cryptography.X509Certificates.X509Certificate2]::new($LatestCert)
+    $LatestCert_X509 = [Security.Cryptography.X509Certificates.X509Certificate2]$_.Properties.usercertificate[0]
     [pscustomobject]@{
-        Computer_DN       = $_.Properties.distinguishedname # case sensitive properties        
-        Cert_NotBefore    = $LatestCert_X509.NotBefore
-        HasSelfSignedCert = $LatestCert_X509.Issuer -match $_.Properties.ObjectGUID
+        Computer_DN    = [string]$_.Properties.distinguishedname # case sensitive properties        
+        Cert_NotBefore = $LatestCert_X509.NotBefore        
     }
 }
 
@@ -57,17 +57,18 @@ while ((Get-ADSyncScheduler).SyncCycleInProgress) {
     sleep 15    
 }
 
-$AADConnector = GetAADConnector
+$AADConnectorLastEnd = (Get-ADSyncRunProfileResult -ConnectorId (GetAADConnector).Identifier -NumberRequested 1).EndDate.ToLocalTime()
 # Microsoft also asks that we wait 5 minutes between Entra export or import
 # : https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-single-object-sync#single-object-sync-throttling
-$5MinutesFromNow = (Get-Date).AddMinutes(5)
-while ($AADConnector.LastModificationTime -lt $5MinutesFromNow) {
-    Write-Verbose "Microsoft asks we wait 5 minutes between exports - waiting one minute."
-    sleep 60    
+
+while ((Get-Date) -lt $AADConnectorLastEnd.AddMinutes(5)) {
+    Write-Verbose "AAD Connector just ran at $AADConnectorLastEnd"
+    Write-Verbose "Microsoft asks we wait 5 minutes between exports - waiting until: $($AADConnectorLastEnd.AddMinutes(5))."
+    sleep 15    
 }
 
-foreach ($Computer in $ComputersToSync) {
-    Invoke-ADSyncSingleObjectSync -DistinguishedName $Computer.Computer_DN -NoHtmlReport -StagingMode # | ConvertFrom-Json
+$ComputersToSync | foreach {
+    Invoke-ADSyncSingleObjectSync -DistinguishedName $_.Computer_DN -NoHtmlReport | ConvertFrom-Json
 }
 
 #endregion 2
